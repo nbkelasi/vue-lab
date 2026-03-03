@@ -1,4 +1,9 @@
 // https://nuxt.com/docs/api/configuration/nuxt-config
+
+// GitHub Pages 子路径：CI 中通过 NUXT_APP_BASE_URL 环境变量设置为 /vue-lab/
+// 本地开发默认 /
+const baseURL = process.env.NUXT_APP_BASE_URL || '/'
+
 export default defineNuxtConfig({
   compatibilityDate: '2025-07-15',
   devtools: { enabled: true },
@@ -42,8 +47,7 @@ export default defineNuxtConfig({
 
   // 全局 head 配置
   app: {
-    // GitHub Pages 子路径：构建时通过环境变量 NUXT_APP_BASE_URL 覆盖
-    baseURL: '/',
+    baseURL,
     head: {
       title: 'Vue Lab - Vue 学习实验室',
       meta: [
