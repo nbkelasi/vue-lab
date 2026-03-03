@@ -15,8 +15,14 @@ export default defineNuxtConfig({
 
   // Nitro 服务端引擎配置
   nitro: {
-    // GitHub Pages 预设：生成纯静态文件到 .output/public
-    preset: 'github-pages',
+    // 预渲染配置（nuxt generate 使用）
+    prerender: {
+      // 从首页开始爬取所有链接
+      routes: ['/'],
+      crawlLinks: true,
+      // Content 模块的 SQL dump 等辅助路由 404 时不中断构建
+      failOnError: false,
+    },
   },
 
   // Nuxt Content 配置

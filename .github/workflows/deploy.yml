@@ -41,6 +41,11 @@ jobs:
           # 设置 baseURL 为仓库名子路径（GitHub Pages 要求）
           # 如果使用自定义域名或用户站点（username.github.io），改为 '/'
           NUXT_APP_BASE_URL: /${{ github.event.repository.name }}/
+          # 确保 Nitro 使用静态预设
+          NITRO_PRESET: static
+
+      - name: Add .nojekyll
+        run: touch .output/public/.nojekyll
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
