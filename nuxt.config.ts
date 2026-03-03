@@ -54,7 +54,7 @@ export default defineNuxtConfig({
         { name: 'description', content: 'Vue 效果展示、代码实现、技术文章的综合学习平台' },
       ],
       link: [
-        { rel: 'icon', type: 'image/x-icon', href: '/favicon.ico' },
+        { rel: 'icon', type: 'image/x-icon', href: `${baseURL}favicon.ico` },
         {
           rel: 'stylesheet',
           href: 'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap',
