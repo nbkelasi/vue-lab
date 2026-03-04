@@ -119,90 +119,12 @@ let filterDebounceTimer: ReturnType<typeof setTimeout> | null = null
 
 function initWorker(): void {
   try {
-    const workerCode: string = `
-      var texts = [
-        '虚拟列表只渲染可视区域', '大幅减少 DOM 节点数量，这是高性能长列表的核心技术',
-        '滚动时动态计算可见范围', '使用 transform 偏移模拟位置',
-        'Vue 3 Composition API 实现。结合响应式系统和 computed 属性，可以非常高效地实现虚拟滚动的核心逻辑',
-        '性能优化的关键技术',
-        '支持十万级数据量渲染，通过只渲染可视区域内的 DOM 节点来保证高性能',
-        '节省内存与 CPU 开销',
-        'IntersectionObserver 优化',
-        'requestAnimationFrame 节流。rAF 会在浏览器下一次重绘之前执行回调，确保每帧最多更新一次',
-        'Web Worker 后台计算',
-        'CSS contain 渲染隔离，告诉浏览器每个列表项的渲染独立于外部',
-      ];
-      var categories = ['性能', '架构', '渲染', '优化', '数据', '交互'];
-
-      function generateData(count) {
-        var data = [];
-        for (var i = 0; i < count; i++) {
-          data.push({
-            id: i + 1,
-            text: '第 ' + (i + 1) + ' 项 — ' + texts[i % texts.length],
-            category: categories[i % categories.length],
-            value: Math.floor(Math.random() * 10000),
-            color: 'hsl(' + ((i * 37) % 360) + ', 70%, 85%)',
-          });
-        }
-        return data;
-      }
-
-      function filterData(data, keyword, category) {
-        var result = data;
-        if (keyword) {
-          var lower = keyword.toLowerCase();
-          result = result.filter(function(item) {
-            return item.text.toLowerCase().includes(lower) || item.id.toString().includes(lower);
-          });
-        }
-        if (category && category !== 'all') {
-          result = result.filter(function(item) { return item.category === category; });
-        }
-        return result;
-      }
-
-      function sortData(data, sortBy, sortOrder) {
-        var sorted = data.slice();
-        sorted.sort(function(a, b) {
-          var c = 0;
-          switch (sortBy) {
-            case 'id': c = a.id - b.id; break;
-            case 'value': c = a.value - b.value; break;
-            case 'text': c = a.text.localeCompare(b.text); break;
-            case 'category': c = a.category.localeCompare(b.category); break;
-            default: c = a.id - b.id;
-          }
-          return sortOrder === 'desc' ? -c : c;
-        });
-        return sorted;
-      }
-
-      self.addEventListener('message', function(e) {
-        var type = e.data.type;
-        var payload = e.data.payload;
-        var start = performance.now();
-        switch (type) {
-          case 'generate': {
-            var data = generateData(payload.count);
-            self.postMessage({ type: 'generated', data: data, elapsed: performance.now() - start });
-            break;
-          }
-          case 'filter': {
-            var filtered = filterData(payload.data, payload.keyword, payload.category);
-            self.postMessage({ type: 'filtered', data: filtered, elapsed: performance.now() - start });
-            break;
-          }
-          case 'sort': {
-            var sorted = sortData(payload.data, payload.sortBy, payload.sortOrder);
-            self.postMessage({ type: 'sorted', data: sorted, elapsed: performance.now() - start });
-            break;
-          }
-        }
-      });
-    `
-    const blob: Blob = new Blob([workerCode], { type: 'application/javascript' })
-    worker = new Worker(URL.createObjectURL(blob))
+    // 使用 Vite 原生的 Worker 导入方式，引用独立的 TS Worker 文件
+    // new URL 的第一个参数必须是相对路径，Vite 会自动编译并打包
+    worker = new Worker(
+      new URL('../../workers/virtualListWorker.ts', import.meta.url),
+      { type: 'module' }
+    )
     worker.addEventListener('message', handleWorkerMessage)
     isProcessing.value = true
     postWorkerMessage({ type: 'generate', payload: { count: totalItems.value } })

@@ -5,6 +5,12 @@
   2. 渲染后通过 ResizeObserver 记录每个列表项的真实高度
   3. 使用缓存数组存储每项的 top/bottom/height，快速二分查找可见范围
   通过 MDC 语法 ::VirtualListDynamicHeight 在 Markdown 中使用
+
+  性能优化（修复快速拖动滚动条卡死问题）：
+  - positions 使用普通数组 + 版本号，避免 Vue 深度响应式代理开销
+  - 级联更新限制最多 200 项，避免 O(n) 全量遍历
+  - rAF 节流滚动事件，每帧最多更新一次
+  - CSS contain 隔离渲染
 -->
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
@@ -23,6 +29,12 @@ const CONFIG: DynamicHeightConfig = {
 
 /** 高度变化判定阈值（px），低于此值视为无变化 */
 const HEIGHT_DIFF_THRESHOLD: number = 0.5
+
+/**
+ * 级联更新最大项数
+ * 限制每次高度变化后向下级联更新的范围，避免 O(n) 遍历导致卡死
+ */
+const MAX_CASCADE: number = 200
 
 /** 模拟不同高度的内容文本库 */
 const CONTENT_VARIANTS: readonly string[] = [
@@ -46,9 +58,25 @@ const containerRef: Ref<HTMLElement | null> = ref<HTMLElement | null>(null)
 /** 可见列表区域 DOM 引用 */
 const listRef: Ref<HTMLElement | null> = ref<HTMLElement | null>(null)
 
-// ========== 位置缓存 ==========
-/** 每个列表项的空间位置缓存 */
-const positions: Ref<PositionCacheItem[]> = ref<PositionCacheItem[]>([])
+// ========== 位置缓存（使用普通数组，避免 Vue 深度代理开销） ==========
+/**
+ * 位置缓存 — 普通数组（非响应式）
+ * 关键优化：positions 使用普通数组而非 Ref<PositionCacheItem[]>
+ * 因为 10,000 个对象的深度 Proxy 代理会导致每次赋值极慢
+ */
+let positionsCache: PositionCacheItem[] = []
+
+/**
+ * 位置缓存版本号（响应式）
+ * 每次修改 positionsCache 后递增，触发依赖它的 computed 重新计算
+ */
+const positionVersion: Ref<number> = ref(0)
+
+// ========== rAF 节流 ==========
+/** rAF 请求 ID */
+let rafId: number | null = null
+/** 待处理的滚动位置 */
+let pendingScrollTop: number | null = null
 
 // ========== 数据生成 ==========
 /** 生成全量模拟数据（每项内容不同，导致高度不同） */
@@ -68,23 +96,26 @@ const allData: ComputedRef<DynamicHeightItem[]> = computed<DynamicHeightItem[]>(
  * 所有项使用预估高度初始化，渲染后由 ResizeObserver 更新为真实高度
  */
 function initPositions(): void {
-  positions.value = allData.value.map((_, index): PositionCacheItem => ({
+  positionsCache = allData.value.map((_, index): PositionCacheItem => ({
     index,
     top: index * CONFIG.estimatedHeight,
     bottom: (index + 1) * CONFIG.estimatedHeight,
     height: CONFIG.estimatedHeight,
   }))
+  positionVersion.value++
 }
 
 /**
  * 测量已渲染 DOM 的真实高度，更新位置缓存
- * 当真实高度与缓存高度差异超过阈值时，级联更新后续所有项的 top/bottom
+ * 优化：级联更新限制为 MAX_CASCADE 项，避免 O(n) 卡死
  */
 function updatePositions(): void {
   if (!listRef.value) return
 
   const nodes: HTMLCollection = listRef.value.children
   if (!nodes || nodes.length === 0) return
+
+  let changed: boolean = false
 
   for (let i = 0; i < nodes.length; i++) {
     const node: Element | undefined = nodes[i]
@@ -94,26 +125,33 @@ function updatePositions(): void {
     const realHeight: number = rect.height
     const dataIndex: number = startIndex.value + i
 
-    const currentPos: PositionCacheItem | undefined = positions.value[dataIndex]
+    const currentPos: PositionCacheItem | undefined = positionsCache[dataIndex]
     if (!currentPos) continue
 
     const oldHeight: number = currentPos.height
     const diff: number = realHeight - oldHeight
 
     if (Math.abs(diff) > HEIGHT_DIFF_THRESHOLD) {
+      changed = true
       // 更新当前项
       currentPos.height = realHeight
       currentPos.bottom = currentPos.top + realHeight
 
-      // 级联更新后续所有项的位置
-      for (let j = dataIndex + 1; j < positions.value.length; j++) {
-        const pos: PositionCacheItem | undefined = positions.value[j]
-        const prevPos: PositionCacheItem | undefined = positions.value[j - 1]
+      // 级联更新后续项的位置（限制最大范围，避免卡死）
+      const cascadeEnd: number = Math.min(dataIndex + 1 + MAX_CASCADE, positionsCache.length)
+      for (let j = dataIndex + 1; j < cascadeEnd; j++) {
+        const pos: PositionCacheItem | undefined = positionsCache[j]
+        const prevPos: PositionCacheItem | undefined = positionsCache[j - 1]
         if (!pos || !prevPos) continue
         pos.top = prevPos.bottom
         pos.bottom = pos.top + pos.height
       }
     }
+  }
+
+  // 只在有变化时才递增版本号，触发 computed 更新
+  if (changed) {
+    positionVersion.value++
   }
 }
 
@@ -122,22 +160,18 @@ function updatePositions(): void {
  * 二分查找：给定 scrollTop，找到包含该位置的列表项索引
  * 在位置缓存数组中搜索，时间复杂度 O(log n)
  *
- * 关键修复：当 targetScrollTop 超过所有项的 bottom（滚动到列表末尾时），
- * 之前的实现只走 `low = mid + 1` 而不更新 result，导致返回初始值 0。
- * 这使得 endIndex 远小于 startIndex → slice 返回空数组 → 白屏。
- *
  * @param targetScrollTop - 目标滚动位置（px）
  * @returns 包含该位置的列表项索引
  */
 function binarySearch(targetScrollTop: number): number {
-  const len: number = positions.value.length
+  const len: number = positionsCache.length
   if (len === 0) return 0
 
   // 边界保护：在列表之前 → 返回第一项
   if (targetScrollTop <= 0) return 0
 
-  // 边界保护：超过列表末尾 → 返回最后一项（修复底部白屏的关键！）
-  const lastPos: PositionCacheItem | undefined = positions.value[len - 1]
+  // 边界保护：超过列表末尾 → 返回最后一项
+  const lastPos: PositionCacheItem | undefined = positionsCache[len - 1]
   if (lastPos && targetScrollTop >= lastPos.bottom) return len - 1
 
   let low: number = 0
@@ -146,19 +180,16 @@ function binarySearch(targetScrollTop: number): number {
 
   while (low <= high) {
     const mid: number = (low + high) >>> 1
-    const midPos: PositionCacheItem | undefined = positions.value[mid]
+    const midPos: PositionCacheItem | undefined = positionsCache[mid]
     if (!midPos) break
 
     if (midPos.bottom <= targetScrollTop) {
-      // targetScrollTop 在 mid 之后，记录 mid 作为已知最近项
       result = mid
       low = mid + 1
     } else if (midPos.top > targetScrollTop) {
-      // targetScrollTop 在 mid 之前
       high = mid - 1
       result = mid
     } else {
-      // targetScrollTop 在 mid 的 top ~ bottom 之间
       return mid
     }
   }
@@ -168,14 +199,17 @@ function binarySearch(targetScrollTop: number): number {
 // ========== 虚拟列表核心计算 ==========
 /** 可视区域起始索引（含缓冲区） */
 const startIndex: ComputedRef<number> = computed<number>(() => {
-  const count: number = positions.value.length
+  // 依赖 positionVersion 触发重算
+  const _v = positionVersion.value
+  const count: number = positionsCache.length
   if (count === 0) return 0
   return Math.max(0, binarySearch(scrollTop.value) - CONFIG.buffer)
 })
 
 /** 可视区域结束索引（含缓冲区） */
 const endIndex: ComputedRef<number> = computed<number>(() => {
-  const count: number = positions.value.length
+  const _v = positionVersion.value
+  const count: number = positionsCache.length
   if (count === 0) return 0
   const end: number = binarySearch(scrollTop.value + CONFIG.containerHeight)
   return Math.min(end + CONFIG.buffer * 2, count)
@@ -188,14 +222,16 @@ const visibleItems: ComputedRef<DynamicHeightItem[]> = computed<DynamicHeightIte
 
 /** 可见区域的 Y 轴偏移量（px） */
 const offsetY: ComputedRef<number> = computed<number>(() => {
-  if (positions.value.length === 0 || startIndex.value >= positions.value.length) return 0
-  return positions.value[startIndex.value]?.top ?? 0
+  const _v = positionVersion.value
+  if (positionsCache.length === 0 || startIndex.value >= positionsCache.length) return 0
+  return positionsCache[startIndex.value]?.top ?? 0
 })
 
 /** 列表总高度（px），基于位置缓存的最后一项的 bottom 值 */
 const totalHeight: ComputedRef<number> = computed<number>(() => {
-  if (positions.value.length === 0) return 0
-  return positions.value[positions.value.length - 1]?.bottom ?? 0
+  const _v = positionVersion.value
+  if (positionsCache.length === 0) return 0
+  return positionsCache[positionsCache.length - 1]?.bottom ?? 0
 })
 
 // ========== 性能统计 ==========
@@ -245,10 +281,23 @@ function observeCurrentChildren(): void {
 }
 
 // ========== 事件处理 ==========
-/** 滚动事件处理 */
+/**
+ * 滚动事件处理（rAF 节流）
+ * 快速拖动滚动条时，每帧最多更新一次 scrollTop
+ */
 function onScroll(e: Event): void {
   const target = e.target as HTMLElement
-  scrollTop.value = target.scrollTop
+  pendingScrollTop = target.scrollTop
+
+  if (rafId === null) {
+    rafId = requestAnimationFrame((): void => {
+      if (pendingScrollTop !== null) {
+        scrollTop.value = pendingScrollTop
+        pendingScrollTop = null
+      }
+      rafId = null
+    })
+  }
 }
 
 /** 监听可见范围变化，更新位置 + 重新观察新 DOM */
@@ -279,6 +328,12 @@ onMounted((): void => {
 })
 
 onBeforeUnmount((): void => {
+  // 清理 rAF
+  if (rafId !== null) {
+    cancelAnimationFrame(rafId)
+    rafId = null
+  }
+  // 清理 ResizeObserver
   if (resizeObserver) {
     resizeObserver.disconnect()
     resizeObserver = null
@@ -287,7 +342,7 @@ onBeforeUnmount((): void => {
 </script>
 
 <template>
-  <div class="vl-dynamic my-6 rounded-xl border border-[var(--border-color)] overflow-hidden" style="background: var(--bg-card)">
+  <div class="vl-dynamic my-6 rounded-xl border border-[var(--border-color)] overflow-hidden " style="background: var(--bg-card)">
     <!-- 标题栏 -->
     <div class="vl-dynamic__header px-5 py-3 border-b border-[var(--border-color)]" style="background: var(--bg-soft)">
       <div class="flex items-center gap-2 mb-2">
@@ -298,7 +353,7 @@ onBeforeUnmount((): void => {
         </span>
       </div>
       <p class="text-[11px] text-[var(--text-muted)] m-0 leading-relaxed">
-        支持每项不同高度 · 预估高度 + ResizeObserver 实时校准 · 二分查找定位
+        支持每项不同高度 · 预估高度 + ResizeObserver 实时校准 · 二分查找定位 · rAF 节流
       </p>
     </div>
 
@@ -339,7 +394,7 @@ onBeforeUnmount((): void => {
       <!-- 撑开滚动高度的占位层 -->
       <div :style="{ height: totalHeight + 'px', position: 'relative' }">
         <!-- 可见区域 -->
-        <div ref="listRef" :style="{ transform: `translateY(${offsetY}px)` }">
+        <div ref="listRef" :style="{ transform: `translateY(${offsetY}px)`, willChange: 'transform' }">
           <div
             v-for="item in visibleItems"
             :key="item.id"
@@ -385,7 +440,8 @@ onBeforeUnmount((): void => {
 </template>
 
 <style scoped>
+/* CSS contain 优化：告诉浏览器每个列表项渲染独立，减少布局污染 */
 .vl-dynamic__item {
-  contain: layout style;
+  contain: layout style paint;
 }
 </style>

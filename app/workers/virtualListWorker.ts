@@ -3,8 +3,8 @@
  * 将大数据的排序、过滤等计算密集型操作移至后台线程
  * 避免阻塞主线程，防止滚动卡顿和白屏
  *
- * 注意：此文件作为类型参考。实际运行时组件内使用内联 Worker（Blob URL），
- * 因为独立 Worker 文件在 Nuxt/SSR 环境中需要额外的构建配置。
+ * 由 VirtualListOptimized.vue 通过 Vite 的 Worker 导入加载：
+ * new Worker(new URL('~/workers/virtualListWorker.ts', import.meta.url), { type: 'module' })
  */
 
 // ========== 类型定义（Worker 环境无法 import，需本地声明） ==========
